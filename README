@@ -1,0 +1,15 @@
+Proxy for MongoDB which can filter certain operations from MongoDB.
+
+This can, for example, be used to enforce a read-only database.
+
+Filter opcodes by passing the -o option when running. Multiple -o options can be provided if filtering multiple opcodes. 
+The opcodes can be found at http://www.mongodb.org/display/DOCS/Mongo+Wire+Protocol
+
+To run:
+mvn package (will build mongoproxy-*.jar in target/)
+
+java -server -jar target/mongoproxy-1.jar
+
+
+The proxy is built on the Grizzly NIO framework:
+http://grizzly.java.net/
