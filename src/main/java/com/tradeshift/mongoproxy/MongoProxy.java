@@ -14,9 +14,9 @@ import org.kohsuke.args4j.CmdLineParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class GrizzlyProxy {
+public class MongoProxy {
 	
-	private static final Logger log = LoggerFactory.getLogger(GrizzlyProxy.class);
+	private static final Logger log = LoggerFactory.getLogger(MongoProxy.class);
 
 	public static void main(String[] args) {
 		Options opts = new Options();
@@ -37,19 +37,19 @@ public class GrizzlyProxy {
 		FilterChainBuilder fb = FilterChainBuilder.stateless();
 		fb.add(new TransportFilter());
 		
-		String mongoHost = "localhost";
-		int mongoPort = 27017;
+		String mongoHost = opts.getMongoHost();
+		int mongoPort = opts.getMongoPort();
 		log.info("Connecting to mongo at {}:{}", mongoHost, mongoPort);
 		fb.add(new OpcodeFilter(TCPNIOConnectorHandler.builder(transport).build(), mongoHost, mongoPort, opts.getOpcodes()));
 		
 		transport.setProcessor(fb.build());
 		try {
-			TCPNIOServerConnection connection = transport.bind(29017);
+			TCPNIOServerConnection connection = transport.bind(opts.getLocalPort());
 			transport.start();
 
 			log.info("Proxy running on {}", connection.getLocalAddress());
-			synchronized(GrizzlyProxy.class) {
-				GrizzlyProxy.class.wait();
+			synchronized(MongoProxy.class) {
+				MongoProxy.class.wait();
 			}
 		} catch (IOException e) {
 			e.printStackTrace();
