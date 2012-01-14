@@ -13,44 +13,58 @@ import com.mongodb.DB;
 import com.mongodb.DBCollection;
 import com.mongodb.Mongo;
 import com.mongodb.MongoException;
+import com.mongodb.MongoOptions;
 import com.mongodb.MongoURI;
+import com.mongodb.ServerAddress;
 import com.mongodb.WriteConcern;
 
 public class MongoTest {
 	
-	private static ExecutorService executor = Executors.newFixedThreadPool(50);
+	private static ExecutorService executor = Executors.newFixedThreadPool(100);
 
 	private static volatile long time;
 	public static void main(String[] args) {
 		try {
-			Mongo mongo = new Mongo(new MongoURI("mongodb://127.0.0.1:29017"));
+			MongoOptions opts = new MongoOptions();
+			opts.connectionsPerHost = 100;
+			opts.autoConnectRetry = true;
+			opts.connectTimeout = 2000;
+			opts.socketTimeout = 10000;
+					
+			Mongo mongo = new Mongo(new ServerAddress("127.0.0.1", 29017), opts);
 			final DB db = mongo.getDB("auditlog_c88932a2-06ae-40a7-9d64-6bc6847f18df");
 			db.setWriteConcern(WriteConcern.FSYNC_SAFE);
 			final DBCollection test = db.getCollection("testing");
 
-			final int count = 1;
+			System.out.println("Warming up");
+			for (int i = 0; i < 10; i++) {
+				run(db, test);
+			}
+			System.out.println("Running test");
+			
+			final int count = 10000;
 			final CountDownLatch latch = new CountDownLatch(count);
 			for (int i = 0; i < count; i++) {
 				executor.execute(new Runnable() {
 					@Override
 					public void run() {
-						long start = System.currentTimeMillis();
-						db.requestStart();
 						try {
-							BasicDBObject o = new BasicDBObject ("test" + UUID.randomUUID(), UUID.randomUUID());
-							test.insert(o);
+							for (int i = 0; i < 100; i++) {
+								long start = System.currentTimeMillis();
+								MongoTest.run(db, test);
+								time += System.currentTimeMillis() - start;
+							}
 						} finally {
-							db.requestDone();
+							latch.countDown();
 						}
-						time += System.currentTimeMillis() - start;
-						latch.countDown();
 					}
+
 				});
 			}
 			
 			latch.await();
 			
-			System.out.println("Time taken: " + time + ", avg: " + (time / count));
+			System.out.println("Time taken: " + time + ", avg: " + (time / (count * 100)));
 			System.exit(0);
 		} catch (MongoException e) {
 			// TODO Auto-generated catch block
@@ -63,4 +77,15 @@ public class MongoTest {
 			e.printStackTrace();
 		}
 	}
+	
+	private static void run(final DB db, final DBCollection test) {
+		db.requestStart();
+		try {
+			BasicDBObject o = new BasicDBObject ("test" + UUID.randomUUID(), UUID.randomUUID());
+			test.insert(o);
+		} finally {
+			db.requestDone();
+		}
+	}
+
 }

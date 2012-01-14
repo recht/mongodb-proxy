@@ -37,13 +37,14 @@
  * only if the new code is made subject to such option by the copyright
  * holder.
  */
-
 package com.tradeshift.mongoproxy;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.ByteOrder;
+import java.util.BitSet;
+import java.util.List;
 
 import org.glassfish.grizzly.Buffer;
 import org.glassfish.grizzly.CompletionHandler;
@@ -52,43 +53,52 @@ import org.glassfish.grizzly.Grizzly;
 import org.glassfish.grizzly.SocketConnectorHandler;
 import org.glassfish.grizzly.attributes.Attribute;
 import org.glassfish.grizzly.filterchain.BaseFilter;
-import org.glassfish.grizzly.filterchain.FilterChain;
 import org.glassfish.grizzly.filterchain.FilterChainContext;
 import org.glassfish.grizzly.filterchain.NextAction;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-/**
- * Simple tunneling filter, which maps input of one connection to the output of
- * another and vise versa.
- *
- * @author Alexey Stashok
- */
-public class TunnelFilter extends BaseFilter {
-    private Attribute<Connection> peerConnectionAttribute =
-            Grizzly.DEFAULT_ATTRIBUTE_BUILDER.createAttribute("TunnelFilter.peerConnection");
+public class OpcodeFilter extends BaseFilter {
+	private static final Logger log = LoggerFactory.getLogger(OpcodeFilter.class);
+	
+    private Attribute<Connection<?>> peerConnectionAttribute = Grizzly.DEFAULT_ATTRIBUTE_BUILDER.createAttribute("OpcodeFilter.peerConnection");
 
     // Transport, which will be used to create peer connection
     private final SocketConnectorHandler transport;
 
     // Destination address for peer connections
     private final SocketAddress redirectAddress;
+    private final BitSet rejectOpcodes = new BitSet();
+    private int requestId = 0;
 
-    public TunnelFilter(SocketConnectorHandler transport, String host, int port) {
+    public OpcodeFilter(SocketConnectorHandler transport, String host, int port, List<Integer> rejectOpcodes) {
         this(transport, new InetSocketAddress(host, port));
+        log.info("Rejecting opcodes {}", rejectOpcodes);
+        if (rejectOpcodes != null) {
+        	for (Integer opCode : rejectOpcodes) {
+				this.rejectOpcodes.set(opCode);
+			}
+        }
     }
 
-    public TunnelFilter(SocketConnectorHandler transport, SocketAddress redirectAddress) {
+    public OpcodeFilter(SocketConnectorHandler transport, SocketAddress redirectAddress) {
         this.transport = transport;
         this.redirectAddress = redirectAddress;
+    }
+    
+    @Override
+    public NextAction handleConnect(FilterChainContext ctx) throws IOException {
+    	log.debug("New connection: {}", ctx.getConnection());
+    	return super.handleConnect(ctx);
     }
     
     /**
      * This method will be called, once {@link Connection} has some available data
      */
     @Override
-    public NextAction handleRead(final FilterChainContext ctx)
-            throws IOException {
-        final Connection connection = ctx.getConnection();
-        final Connection peerConnection = peerConnectionAttribute.get(connection);
+    public NextAction handleRead(final FilterChainContext ctx) throws IOException {
+        final Connection<?> connection = ctx.getConnection();
+        final Connection<?> peerConnection = peerConnectionAttribute.get(connection);
 
         // if connection is closed - stop the execution
         if (!connection.isOpen()) {
@@ -97,6 +107,7 @@ public class TunnelFilter extends BaseFilter {
 
         // if peerConnection wasn't created - create it (usually happens on first connection request)
         if (peerConnection == null) {
+        	log.debug("Connecting to mongo at {}", redirectAddress);
             // "Peer connect" phase could take some time - so execute it in non-blocking mode
 
             // Connect peer connection and register completion handler
@@ -115,18 +126,36 @@ public class TunnelFilter extends BaseFilter {
         msg.order(ByteOrder.LITTLE_ENDIAN);
         int msgLength = msg.getInt();
         int requestId = msg.getInt();
-        int responseTo = msg.getInt();
+        @SuppressWarnings("unused")
+		int responseTo = msg.getInt();
         int opCode = msg.getInt();
         msg.reset();
-//        System.out.println("Opcode: " + opCode);
-        if (opCode == 2004) {
-//        	ctx.fail(new Exception());
-        }
+        
         
         if (length < msgLength) {
         	return ctx.getStopAction(msg);
         }
         final Buffer remainder = length > msgLength ?  msg.split(msgLength) : null;
+        
+        if (rejectOpcodes.get(opCode)) {
+        	log.warn("Opcode {} from {} ({}) will be rejected", new Object[] { opCode, ctx.getAddress(), requestId });
+
+        	Buffer out = connection.getTransport().getMemoryManager().allocate(36);
+        	out.order(ByteOrder.LITTLE_ENDIAN);
+        	out.putInt(36);
+        	out.putInt(this.requestId++);
+        	out.putInt(requestId);
+        	out.putInt(opCode);
+        	out.putInt(0); // flags
+        	out.putLong(0); // cursor
+        	out.putInt(0); // startingFrom
+        	out.putInt(1); // numdocs
+        	
+        	ctx.write(out, true);
+//        	out.dispose();
+        	
+        	return ctx.getInvokeAction(remainder);
+        }
         
         // if peer connection is already created - just forward data to peer
         redirectToPeer(ctx, peerConnection);
@@ -135,41 +164,28 @@ public class TunnelFilter extends BaseFilter {
         return ctx.getInvokeAction(remainder);
     }
 
-    /**
-     * This method will be called, to notify about {@link Connection} closing.
-     */
     @Override
     public NextAction handleClose(FilterChainContext ctx) throws IOException {
-        final Connection connection = ctx.getConnection();
-        final Connection peerConnection = peerConnectionAttribute.get(connection);
+        final Connection<?> connection = ctx.getConnection();
+        final Connection<?> peerConnection = peerConnectionAttribute.get(connection);
 
         // Close peer connection as well, if it wasn't closed before
         if (peerConnection != null && peerConnection.isOpen()) {
             peerConnection.close();
         }
+        log.debug("Closing connection {} with peer {}", connection, peerConnection);
 
         return ctx.getInvokeAction();
     }
 
     /**
      * Redirect data from {@link Connection} to its peer.
-     *
-     * @param context {@link FilterChainContext}
-     * @param peerConnection peer {@link Connection}
-     * @throws IOException
      */
-    @SuppressWarnings("unchecked")
-    private static void redirectToPeer(final FilterChainContext context,
-            final Connection peerConnection) throws IOException {
-
-        final Connection srcConnection = context.getConnection();
+    private static void redirectToPeer(final FilterChainContext context, final Connection<?> peerConnection) throws IOException {
         final Object message = context.getMessage();
         peerConnection.write(message);
     }
     
-    /**
-     * Peer connect {@link CompletionHandler}
-     */
     private class ConnectCompletionHandler implements CompletionHandler<Connection> {
         private final FilterChainContext context;
         
@@ -193,8 +209,8 @@ public class TunnelFilter extends BaseFilter {
          * If peer was successfully connected - map both connections to each other.
          */
         @Override
-        public void completed(Connection peerConnection) {
-            final Connection connection = context.getConnection();
+        public void completed(@SuppressWarnings("rawtypes") Connection peerConnection) {
+            final Connection<?> connection = context.getConnection();
 
             // Map connections
             peerConnectionAttribute.set(connection, peerConnection);
@@ -205,22 +221,14 @@ public class TunnelFilter extends BaseFilter {
         }
 
         @Override
-        public void updated(Connection peerConnection) {
+        public void updated(@SuppressWarnings("rawtypes") Connection peerConnection) {
         }
 
-        /**
-         * Resume {@link FilterChain} execution on stage, where it was
-         * earlier suspended.
-         */
         private void resumeContext() {
             context.resume();
         }
 
-        /**
-         * Close the {@link Connection}
-         * @param connection {@link Connection}
-         */
-        private void close(Connection connection) {
+        private void close(@SuppressWarnings("rawtypes") Connection connection) {
             try {
                 connection.close();
             } catch (IOException e) {
